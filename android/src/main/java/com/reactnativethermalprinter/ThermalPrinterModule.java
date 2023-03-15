@@ -48,7 +48,8 @@ import java.util.Set;
 @ReactModule(name = ThermalPrinterModule.NAME)
 public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   private static final String LOG_TAG = "RN_Thermal_Printer";
-  public static final String NAME = "ThermalPrinterModule";
+  private static final String NAME = "ThermalPrinterModule";
+  private static final String[] BLUETOOTH_PERMISSIONS_S = { Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT};
   private Promise jsPromise;
   private ArrayList<BluetoothConnection> btDevicesList = new ArrayList();
 
@@ -87,6 +88,7 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   public void printBluetooth(String macAddress, String payload, boolean autoCut, boolean openCashbox, double mmFeedPaper, double printerDpi, double printerWidthMM, double printerNbrCharactersPerLine, Promise promise) {
     this.jsPromise = promise;
     BluetoothConnection btPrinter;
+    boolean hasPermissions = true;
 
     if (TextUtils.isEmpty(macAddress)) {
       btPrinter = BluetoothPrintersConnections.selectFirstPaired();
@@ -99,8 +101,22 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
     }
 
     if (ContextCompat.checkSelfPermission(getCurrentActivity(), Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
+      hasPermissions = false;
       ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{Manifest.permission.BLUETOOTH}, 1);
-    } else {
+    } 
+    
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      int requestCode = 2;
+      for (String permission : BLUETOOTH_PERMISSIONS_S) {
+        if (ContextCompat.checkSelfPermission(getCurrentActivity(), permission) != PackageManager.PERMISSION_GRANTED) {
+          hasPermissions = false;
+          ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{permission}, requestCode);
+        }
+        requestCode++;
+      }
+    } 
+    
+    if (hasPermissions) {
       try {
         this.printIt(btPrinter.connect(), payload, autoCut, openCashbox, mmFeedPaper, printerDpi, printerWidthMM, printerNbrCharactersPerLine);
       } catch (Exception e) {
@@ -112,9 +128,25 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void getBluetoothDeviceList(Promise promise) {
     this.jsPromise = promise;
+    boolean hasPermissions = true;
+    
     if (ContextCompat.checkSelfPermission(getCurrentActivity(), Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
+      hasPermissions = false;
       ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{Manifest.permission.BLUETOOTH}, 1);
-    } else {
+    } 
+    
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+      int requestCode = 2;
+      for (String permission : BLUETOOTH_PERMISSIONS_S) {
+        if (ContextCompat.checkSelfPermission(getCurrentActivity(), permission) != PackageManager.PERMISSION_GRANTED) {
+          hasPermissions = false;
+          ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{permission}, requestCode);
+        }
+        requestCode++;
+      }
+    } 
+    
+    if (hasPermissions) {
       try {
         Set<BluetoothDevice> pairedDevices = BluetoothAdapter.getDefaultAdapter().getBondedDevices();
         WritableArray rnArray = new WritableNativeArray();
