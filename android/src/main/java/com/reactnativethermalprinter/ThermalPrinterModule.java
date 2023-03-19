@@ -1,8 +1,14 @@
 package com.reactnativethermalprinter;
 
+import android.app.AlertDialog;
+import android.content.DialogInterface;
 import android.Manifest;
+import android.os.Build;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.content.Intent;
+import android.net.Uri;
+import android.provider.Settings;
 
 import androidx.annotation.NonNull;
 import androidx.core.app.ActivityCompat;
@@ -23,7 +29,12 @@ import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.module.annotations.ReactModule;
+import com.facebook.react.modules.core.PermissionListener;
+import com.facebook.react.modules.core.PermissionAwareActivity;
 
+import java.util.List;
+import java.util.Map;
+import java.util.HashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -46,15 +57,34 @@ import java.util.Iterator;
 import java.util.Set;
 
 @ReactModule(name = ThermalPrinterModule.NAME)
-public class ThermalPrinterModule extends ReactContextBaseJavaModule {
-  private static final String LOG_TAG = "RN_Thermal_Printer";
-  private static final String NAME = "ThermalPrinterModule";
-  private static final String[] BLUETOOTH_PERMISSIONS_S = { Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT};
-  private Promise jsPromise;
+public class ThermalPrinterModule extends ReactContextBaseJavaModule implements PermissionListener {
+
+  public static final String NAME = "ThermalPrinterModule";
+
+  private static ReactApplicationContext reactContext;
+  
+  private static final String[] BLUETOOTH_PERMISSIONS = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S ?
+    new String[] { Manifest.permission.BLUETOOTH_SCAN, Manifest.permission.BLUETOOTH_CONNECT} :
+    new String[] { Manifest.permission.BLUETOOTH, Manifest.permission.BLUETOOTH_ADMIN };
+
   private ArrayList<BluetoothConnection> btDevicesList = new ArrayList();
+
+  private static final int BLUETOOTH_DEVICE_LIST_PERMISSION_REQUEST_CODE = 1;
+  private static final int BLUETOOTH_PRINT_PERMISSION_REQUEST_CODE = 2;
+
+  private Promise jsPromise;
+  private String macAddress; 
+  private String payload;
+  private boolean autoCut;
+  private boolean openCashbox;
+  private double mmFeedPaper;
+  private double printerDpi;
+  private double printerWidthMM;
+  private double printerNbrCharactersPerLine;
 
   public ThermalPrinterModule(ReactApplicationContext reactContext) {
     super(reactContext);
+    this.reactContext = reactContext;
   }
 
   @Override
@@ -76,9 +106,16 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
 //        float -> number
 //
     this.jsPromise = promise;
+    this.payload = payload;
+    this.autoCut = autoCut;
+    this.openCashbox = openCashbox;
+    this.mmFeedPaper = mmFeedPaper;
+    this.printerDpi = printerDpi;
+    this.printerWidthMM = printerWidthMM;
+    this.printerNbrCharactersPerLine = printerNbrCharactersPerLine;
     try {
       TcpConnection connection = new TcpConnection(ipAddress, (int) port, (int) timeout);
-      this.printIt(connection, payload, autoCut, openCashbox, mmFeedPaper, printerDpi, printerWidthMM, printerNbrCharactersPerLine);
+      this.printIt(connection);
     } catch (Exception e) {
       this.jsPromise.reject("Connection Error", e.getMessage());
     }
@@ -87,41 +124,66 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   @ReactMethod
   public void printBluetooth(String macAddress, String payload, boolean autoCut, boolean openCashbox, double mmFeedPaper, double printerDpi, double printerWidthMM, double printerNbrCharactersPerLine, Promise promise) {
     this.jsPromise = promise;
-    BluetoothConnection btPrinter;
+    this.macAddress = macAddress;
+    this.payload = payload;
+    this.autoCut = autoCut;
+    this.openCashbox = openCashbox;
+    this.mmFeedPaper = mmFeedPaper;
+    this.printerDpi = printerDpi;
+    this.printerWidthMM = printerWidthMM;
+    this.printerNbrCharactersPerLine = printerNbrCharactersPerLine;
     boolean hasPermissions = true;
+    PermissionAwareActivity activity = (PermissionAwareActivity) getCurrentActivity();
+    PermissionListener listner = this;
+    List<String> requiredPermissions = new ArrayList<>();
+    for (String permission : BLUETOOTH_PERMISSIONS) {
+      if (activity.checkSelfPermission(permission) == PackageManager.PERMISSION_DENIED) {
+        requiredPermissions.add(permission);
+        hasPermissions = false;
+      }
+    }
+    if (!requiredPermissions.isEmpty()) {
+      activity.requestPermissions(requiredPermissions.toArray(new String[requiredPermissions.size()]), BLUETOOTH_PRINT_PERMISSION_REQUEST_CODE, listner);
+    }
+    if (hasPermissions) {
+      doPrintBluetooth();
+    }
+  }
 
+  private void doPrintBluetooth() {
+    BluetoothConnection btPrinter;
     if (TextUtils.isEmpty(macAddress)) {
       btPrinter = BluetoothPrintersConnections.selectFirstPaired();
     } else {
       btPrinter = getBluetoothConnectionWithMacAddress(macAddress);
     }
-
     if (btPrinter == null) {
-      this.jsPromise.reject("Connection Error", "Bluetooth Device Not Found");
-    }
-
-    if (ContextCompat.checkSelfPermission(getCurrentActivity(), Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
-      hasPermissions = false;
-      ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{Manifest.permission.BLUETOOTH}, 1);
-    } 
-    
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      int requestCode = 2;
-      for (String permission : BLUETOOTH_PERMISSIONS_S) {
-        if (ContextCompat.checkSelfPermission(getCurrentActivity(), permission) != PackageManager.PERMISSION_GRANTED) {
-          hasPermissions = false;
-          ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{permission}, requestCode);
+      AlertDialog.Builder builder = new AlertDialog.Builder(getCurrentActivity());
+      builder.setMessage("No bluetooth printer found. Please enable bluetooth and pair your printer first.");
+      builder.setPositiveButton("Open settings", new DialogInterface.OnClickListener() {
+        @Override
+        public void onClick(DialogInterface dialog, int which) {
+          Intent intent = new Intent();
+          intent.setAction(Settings.ACTION_BLUETOOTH_SETTINGS);
+          intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+          reactContext.startActivity(intent);
+          dialog.dismiss();
         }
-        requestCode++;
-      }
-    } 
-    
-    if (hasPermissions) {
-      try {
-        this.printIt(btPrinter.connect(), payload, autoCut, openCashbox, mmFeedPaper, printerDpi, printerWidthMM, printerNbrCharactersPerLine);
-      } catch (Exception e) {
-        this.jsPromise.reject("Connection Error", e.getMessage());
-      }
+      });
+      builder.setNegativeButton("No thanks", new DialogInterface.OnClickListener() {
+        @Override
+        public void onClick(DialogInterface dialog, int which) {
+          dialog.dismiss();
+        }
+      });
+      AlertDialog dialog = builder.create();
+      dialog.show();
+      this.jsPromise.reject("Connection Error", "Bluetooth printer not found");
+    }  
+    try {
+      this.printIt(btPrinter.connect());
+    } catch (Exception e) {
+      this.jsPromise.reject("Connection Error", e.getMessage());
     }
   }
 
@@ -129,49 +191,45 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   public void getBluetoothDeviceList(Promise promise) {
     this.jsPromise = promise;
     boolean hasPermissions = true;
-    
-    if (ContextCompat.checkSelfPermission(getCurrentActivity(), Manifest.permission.BLUETOOTH) != PackageManager.PERMISSION_GRANTED) {
-      hasPermissions = false;
-      ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{Manifest.permission.BLUETOOTH}, 1);
-    } 
-    
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      int requestCode = 2;
-      for (String permission : BLUETOOTH_PERMISSIONS_S) {
-        if (ContextCompat.checkSelfPermission(getCurrentActivity(), permission) != PackageManager.PERMISSION_GRANTED) {
-          hasPermissions = false;
-          ActivityCompat.requestPermissions(getCurrentActivity(), new String[]{permission}, requestCode);
-        }
-        requestCode++;
+    PermissionAwareActivity activity = (PermissionAwareActivity) getCurrentActivity();
+    PermissionListener listner = this;
+    List<String> requiredPermissions = new ArrayList<>();
+    for (String permission : BLUETOOTH_PERMISSIONS) {
+      if (activity.checkSelfPermission(permission) == PackageManager.PERMISSION_DENIED) {
+        requiredPermissions.add(permission);
+        hasPermissions = false;
       }
-    } 
-    
+    }
+    if (!requiredPermissions.isEmpty()) {
+      activity.requestPermissions(requiredPermissions.toArray(new String[requiredPermissions.size()]), BLUETOOTH_DEVICE_LIST_PERMISSION_REQUEST_CODE, listner);
+    }
     if (hasPermissions) {
-      try {
-        Set<BluetoothDevice> pairedDevices = BluetoothAdapter.getDefaultAdapter().getBondedDevices();
-        WritableArray rnArray = new WritableNativeArray();
-        if (pairedDevices.size() > 0) {
-          int index = 0;
-          for (BluetoothDevice device : pairedDevices) {
-            btDevicesList.add(new BluetoothConnection(device));
-            JSONObject jsonObj = new JSONObject();
+      doGetBluetoothDeviceList();
+    }
+  }
 
-            String deviceName = device.getName();
-            String macAddress = device.getAddress();
+  private void doGetBluetoothDeviceList() {
+    try {
+      Set<BluetoothDevice> pairedDevices = BluetoothAdapter.getDefaultAdapter().getBondedDevices();
+      WritableArray rnArray = new WritableNativeArray();
+      if (pairedDevices.size() > 0) {
+        for (BluetoothDevice device : pairedDevices) {
+          this.btDevicesList.add(new BluetoothConnection(device));
+          JSONObject jsonObj = new JSONObject();
 
-            jsonObj.put("deviceName", deviceName);
-            jsonObj.put("macAddress", macAddress);
-            WritableMap wmap = convertJsonToMap(jsonObj);
-            rnArray.pushMap(wmap);
-          }
+          String deviceName = device.getName();
+          String macAddress = device.getAddress();
+
+          jsonObj.put("deviceName", deviceName);
+          jsonObj.put("macAddress", macAddress);
+          WritableMap wmap = convertJsonToMap(jsonObj);
+          rnArray.pushMap(wmap);
         }
-        jsPromise.resolve(rnArray);
-
-
+      }
+      this.jsPromise.resolve(rnArray);
       } catch (Exception e) {
         this.jsPromise.reject("Bluetooth Error", e.getMessage());
       }
-    }
   }
 
   private Bitmap getBitmapFromUrl(String url) {
@@ -194,7 +252,6 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
    */
 
   private String preprocessImgTag(EscPosPrinter printer, String text) {
-
     Pattern p = Pattern.compile("(?<=\\<img\\>)(.*)(?=\\<\\/img\\>)");
     Matcher m = p.matcher(text);
     StringBuffer sb = new StringBuffer();
@@ -203,15 +260,13 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
       m.appendReplacement(sb, PrinterTextParserImg.bitmapToHexadecimalString(printer, getBitmapFromUrl(firstGroup)));
     }
     m.appendTail(sb);
-
     return sb.toString();
   }
 
-  private void printIt(DeviceConnection printerConnection, String payload, boolean autoCut, boolean openCashbox, double mmFeedPaper, double printerDpi, double printerWidthMM, double printerNbrCharactersPerLine) {
+  private void printIt(DeviceConnection printerConnection) {
     try {
       EscPosPrinter printer = new EscPosPrinter(printerConnection, (int) printerDpi, (float) printerWidthMM, (int) printerNbrCharactersPerLine);
       String processedPayload = preprocessImgTag(printer, payload);
-
       if (openCashbox) {
         printer.printFormattedTextAndOpenCashBox(processedPayload, (float) mmFeedPaper);
       } else if (autoCut) {
@@ -219,7 +274,6 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
       } else {
         printer.printFormattedText(processedPayload, (float) mmFeedPaper);
       }
-
       printer.disconnectPrinter();
       this.jsPromise.resolve(true);
     } catch (EscPosConnectionException e) {
@@ -236,7 +290,7 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
   }
 
   private BluetoothConnection getBluetoothConnectionWithMacAddress(String macAddress) {
-    for (BluetoothConnection device : btDevicesList) {
+    for (BluetoothConnection device : this.btDevicesList) {
       if (device.getDevice().getAddress().contentEquals(macAddress))
         return device;
     }
@@ -245,7 +299,6 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
 
   private static WritableMap convertJsonToMap(JSONObject jsonObject) throws JSONException {
     WritableMap map = new WritableNativeMap();
-
     Iterator<String> iterator = jsonObject.keys();
     while (iterator.hasNext()) {
       String key = iterator.next();
@@ -266,4 +319,73 @@ public class ThermalPrinterModule extends ReactContextBaseJavaModule {
     }
     return map;
   }
+
+  @Override
+  public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+    boolean hasPermissions = true;
+    if (grantResults.length > 0) {
+      for (int i = 0; i < grantResults.length; i++) {
+        if (grantResults[i] == PackageManager.PERMISSION_DENIED) {
+          hasPermissions = false;
+          PermissionAwareActivity activity = (PermissionAwareActivity) getCurrentActivity();
+          boolean showRationale = activity.shouldShowRequestPermissionRationale(permissions[i]);
+          if (showRationale) {
+            AlertDialog.Builder builder = new AlertDialog.Builder(getCurrentActivity());
+            builder.setMessage("Bluetooth permisssion is required for accessing printer. Please allow the permission.");
+            builder.setPositiveButton("Ok", new DialogInterface.OnClickListener() {
+              @Override
+              public void onClick(DialogInterface dialog, int which) {
+                dialog.dismiss();
+              }
+            });
+            AlertDialog dialog = builder.create();
+            dialog.show();
+            this.jsPromise.reject("Permission Error", "Required permissions were not granted");
+          } else {
+            AlertDialog.Builder builder = new AlertDialog.Builder(getCurrentActivity());
+            builder.setMessage("Bluetooth permisssion was denied more than once. You may allow the permission from settings.");
+            builder.setPositiveButton("Open settings", new DialogInterface.OnClickListener() {
+              @Override
+              public void onClick(DialogInterface dialog, int which) {
+                Intent intent = new Intent();
+                intent.setAction(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                Uri uri = Uri.fromParts("package", getCurrentActivity().getPackageName(), null);
+                intent.setData(uri);
+                reactContext.startActivity(intent);
+                dialog.dismiss();
+              }
+            });
+            builder.setNegativeButton("No thanks", new DialogInterface.OnClickListener() {
+              @Override
+              public void onClick(DialogInterface dialog, int which) {
+                dialog.dismiss();
+              }
+            });
+            AlertDialog dialog = builder.create();
+            dialog.show();
+            this.jsPromise.reject("Permission Error", "Required permissions are permanently denied");
+          }
+          break;
+        } 
+      } 
+    } else {
+      hasPermissions = false;
+      this.jsPromise.reject("Permission Error", "Required permissions were not granted");
+    }
+    if (hasPermissions) {
+      switch (requestCode) {
+        case BLUETOOTH_DEVICE_LIST_PERMISSION_REQUEST_CODE:
+          doGetBluetoothDeviceList();
+          break;
+        case BLUETOOTH_PRINT_PERMISSION_REQUEST_CODE:
+          doPrintBluetooth();
+          break;
+        default:
+          this.jsPromise.reject("Request Code Error", "Invalid request code");
+      }
+    }
+    return true;
+  }
+
 }
